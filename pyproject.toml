@@ -1,0 +1,13 @@
+[project]
+name = "ICS cards Parser"
+version = "0.6.0"
+description = "Convert ICS bank statements from PDF to CSV, TSV or JSON."
+authors = [
+    { name = "Freek Dijkstra", email = "software@macfreek.nl" },
+]
+requires-python = ">=3.10"
+dependencies = [
+    "pdfplumber>=0.5.0",
+]
+license = "MIT"
+readme = "README.md"
