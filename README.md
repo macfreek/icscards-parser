@@ -8,11 +8,11 @@ This script heavily relies on the exact layout of the ICS bank statement.
 If that changes, this script will break.
 It has been tested on bank statements from the last 10 years (2016-2025).
 
-=== Requirements ===
+## Requirements
 
 * [pdfplumber](https://pypi.org/project/pdfplumber/)
 
-=== Further Information ===
+## Further Information
 
 Homepage: https://www.github.com/macfreek/icscards-parser/
 
@@ -22,7 +22,7 @@ License: MIT-license
 In short: You can use this script in any way you like, but there is no support or warranty.
 I appreciate that you give credit if you use (large parts of) this script.
 
-=== Usage ===
+## Usage
 
 Call the script with the PDF you like to convert:
 
