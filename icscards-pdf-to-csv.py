@@ -44,6 +44,18 @@ except ImportError:
 DEFAULT_OUTPUT = "TSV"  # CSV or TSV or JSON
 DESTINATION_DIR = None  # The export directory. Use None for the same as the source directory.
 
+
+# Location where info is found on the PDF
+# pdfplumber uses (left, top, right, bottom) for a bounding box (bbox).
+# These coordinates are used by extract_data_from_pdf().
+# Use show_box_boundaries() to check if these values are correct.
+INFO_BOX_BBOX = (56,112,526,160)
+TABLE_HEADER_BBOX = (56,186,550,213)
+FIRST_PAGE_BODY_BBOX = (56,212,550,564)
+LATER_PAGE_BODY_BBOX = (56,210,550,700)
+COLUMN_BOUNDARIES = [57.0, 100.0, 148.0, 275.0, 362.0, 397.0, 474.0, 532.0]
+
+
 @dataclass
 class Transaction:
     """A single line on the bank statement."""
@@ -216,7 +228,7 @@ def parse_amount(amount: str, BijAf: str = "Bij", *args) -> float:
     e.g. '€ 1.234,56', 'Af' becomes -1234.56"""
     if args:
         raise ParseError(f"Too many words in amount: {amount} {BijAf} {' '.join(args)}")
-    intl_amount = amount.strip('€ ').replace('.', '').replace(',', '.')
+    intl_amount = amount.strip('€ \xa0').replace('.', '').replace(',', '.')
     try:
         num_amount = float(intl_amount)
     except ValueError:
@@ -229,10 +241,15 @@ def parse_amount(amount: str, BijAf: str = "Bij", *args) -> float:
     return num_amount
 
 
+def filter_invisible(words: list[dict]) -> list[dict]:
+    words = [word for word in words if word['height'] >= 0.1]
+    return words
+
+
 def group_by_lines(words: list[dict], line_tolerance=3) -> list[list[dict]]:
-    """Groups chars or words together that belong to the same transaction line.
-    Input: list of all words (each a dict from pdfplumber).
-    Output: a list of lines, with each line a list of words."""
+    """Groups char or word objects together that belong to the same transaction line.
+    Input: list of all char/word objects (each a dict from pdfplumber).
+    Output: a list of lines, with each line a list of char/word objects."""
     if not words:
         return []
     line_top = words[0]['top']
@@ -259,7 +276,7 @@ def group_by_lines(words: list[dict], line_tolerance=3) -> list[list[dict]]:
 
 def header_words_to_dict(words: list[dict]) -> dict[str, list[str]]:
     """Correlate keys and values in the header to a dict.
-    Input: list of all words (each a dict from pdfplumber).
+    Input: list of all words (each a data structure from pdfplumber with text and position).
     Output: dict of key -> value(s), with each value a list of string.
     Most values are just one string, but monetary amount have two strings
     (e.g. ["€120,00", "Bij"]) and also page number are two str (e.g. ["1", "van 2"])."""
@@ -295,46 +312,6 @@ def header_words_to_dict(words: list[dict]) -> dict[str, list[str]]:
     return values
 
 
-def get_boundaries_from_first_line(words: list[dict]):
-    """Parse the first line, and return column boundaries."""
-
-    # Many columns in the header are split into multiple subcolumns.
-    # relative_boundaries specifies these boundaries relative to the headers.
-    relative_boundaries = {
-        'Datum transactie': [-1],  # 61.0 -> 60.0
-        'Datum boeking': [-2],  # 105.0 -> 60.0
-        'Omschrijving': [-4, 122, 209],  # 154.0 -> 150.0, 276.0, 363.0
-        'Bedrag in vreemde valuta': [-3, 43],  # 402.0 -> 399.0, 445.0
-        "Bedrag in euro's": [-3, 56],  # 479.0 -> 476.0, 535.0
-    }
-
-    # join words spanning two lines (with same x0, just underneath each other)
-    # headers contains the left boundary as key and title as value
-    headers: dict[float, str] = {}
-    for word in words:
-        if word['x0'] not in headers:
-            headers[word['x0']] = word['text']
-        else:
-            headers[word['x0']] = headers[word['x0']] + " " + word['text']
-
-    # check if we have the headers as expected
-    expected_first_line = list(relative_boundaries.keys())
-    if list(headers.values()) != expected_first_line:
-        raise ParseError(f"Unexpected headers {list(headers.values())}. Expected {expected_first_line}.")
-
-    boundaries = []
-    for x0, header_title in headers.items():
-        for relative_boundary in relative_boundaries[header_title]:
-            boundaries.append(x0 + relative_boundary)
-
-    expected_boundaries = [60.0, 103.0, 150.0, 276.0, 363.0, 399.0, 445.0, 476.0, 535.0]
-    if boundaries != expected_boundaries:
-        logging.warning("Header positions have changed. Adjusting columns accordingly, but you may get unexpected results.")
-        logging.info(f"Expected columns boundaries {expected_boundaries}. Found {boundaries}.")
-    return boundaries
-
-
-
 def is_sentence_line(chars: list[dict], boundaries: list[int]):
     if not chars:
         return False
@@ -362,17 +339,66 @@ def group_by_columns(chars: list[dict], boundaries: list[float]) -> list[str]:
     return row
 
 
+def check_transaction_header(words: list[dict]):
+    """Given the words in the table header, check if the words have the expected values.
+    and are positioned between expects column boundaries.
+    Raise a ParseError if this is not the case."""
+
+    # join words spanning two lines (with same horizontal position, just underneath each other)
+    # headers contains the left boundary as key and (title, right boundary) as value
+    headers: dict[float, tuple[str, float]] = {}
+    for word in words:
+        if word['x0'] not in headers:
+            headers[word['x0']] = (word['text'].strip(), word['x1'])
+        else:
+            headers[word['x0']] = (headers[word['x0']][0] + " " + word['text'].strip(), max(headers[word['x0']][1], word['x1']))
+    # transform from {left_boundary: (title, right_boundary)}
+    # to {title: (left_boundary, right_boundary)}
+    found_boundaries = {title: (x0, x1) for x0, (title, x1) in headers.items()}
+
+    # expected headers, with expected left and right boundary.
+    expected_boundaries = {
+        'Datum transactie': (COLUMN_BOUNDARIES[0], COLUMN_BOUNDARIES[1]),
+        'Datum boeking': (COLUMN_BOUNDARIES[1], COLUMN_BOUNDARIES[2]),
+        'Omschrijving': (COLUMN_BOUNDARIES[2], COLUMN_BOUNDARIES[5]), # 3 subcolumns
+        'Bedrag in vreemde valuta': (COLUMN_BOUNDARIES[5], COLUMN_BOUNDARIES[6]),
+        "Bedrag in euro's": (COLUMN_BOUNDARIES[6], FIRST_PAGE_BODY_BBOX[2]),
+    }
+
+    # check if we have the headers as expected
+    if list(found_boundaries.keys()) != list(expected_boundaries.keys()):
+        raise ParseError(f"Unexpected headers {list(found_boundaries.keys())}. Expected {list(expected_boundaries.keys())}.")
+
+    for title, (x0, x1) in found_boundaries.items():
+        if x0 < expected_boundaries[title][0]:
+            raise ParseError(f"Header position {title!r} has changed to {x0}-{x1}. Expected to be >= {expected_boundaries[title][0]}.")
+        if x1 >= expected_boundaries[title][1]:
+            raise ParseError(f"Header position {title!r} has changed to {x0}-{x1}. Expected to be < {expected_boundaries[title][1]}.")
+        # print(f"{title}: {x0}-{x1} is in between {expected_boundaries[title][0]}-{expected_boundaries[title][1]}")
+
+
 def parse_transaction(line: list[str], year_hint: date) -> Transaction:
     """Given a line with the words in a transaction, return a Transaction object.
     Assumes that the words are in the appropriote order."""
+    assert len(line) == len(COLUMN_BOUNDARIES)
+    assert len(line) == 8
+
     transaction_date = parse_date(line[0], year_hint)
     booking_date = parse_date(line[1], year_hint)
     description = line[2].strip()
     location = line[3].strip()
     country = line[4].strip()
-    amount = parse_amount(line[7], line[8])
-    foreign_amount = parse_amount(line[5]) if line[5] else None
-    foreign_currency = line[6] if line[6] else None
+    amount = parse_amount(line[6], line[7])
+    RE_AMOUNT_CURRENCY = re.compile(r'(.+\d) *([A-Z][A-Z][A-Z])', re.IGNORECASE)
+    if m := RE_AMOUNT_CURRENCY.fullmatch(line[5]):
+        foreign_amount = parse_amount(m.group(1))
+        foreign_currency = m.group(2)
+    elif line[5]:
+        foreign_amount = parse_amount(line[5])
+        foreign_currency = None
+    else:
+        foreign_amount = None
+        foreign_currency = None
     foreign_exchange_rate = None
     return Transaction(
         transaction_date = transaction_date,
@@ -385,59 +411,66 @@ def parse_transaction(line: list[str], year_hint: date) -> Transaction:
         foreign_currency = foreign_currency,
     )
 
-def parse_ics_pdf(path: Path) -> BankStatement:
-    """This is the main function.
-    It parses the PDF file and outputs it as a data structure.
-    returns a BankStatement, or raises a ParseError or IOError."""
 
-    # Location where info is found on the PDF
-    # pdfplumber uses (left, top, right, bottom) for a bounding box (bbox).
-    INFO_BOX_BBOX = (56,112,526,160)
-    TABLE_HEADER_BBOX = (56,186,550,213)
-    FIRST_PAGE_BODY_BBOX = (56,212,550,564)
-    LATER_PAGE_BODY_BBOX = (56,210,550,700)
+def show_box_boundaries(path: Path):
+    """Debug function: display boxes and boundaries"""
+    with pdfplumber.open(path) as pdf:
+        page = pdf.pages[0]
+        BODY_BOX = FIRST_PAGE_BODY_BBOX
+        im = page.to_image(resolution=300)
+        im.draw_rect(INFO_BOX_BBOX)
+        im.draw_rect(TABLE_HEADER_BBOX)
+        im.draw_rect(BODY_BOX)
+        for x in COLUMN_BOUNDARIES:
+            im.draw_line(((x, BODY_BOX[1]), (x, BODY_BOX[3])))
+        # chars = filter_invisible(page.within_bbox(BODY_BOX).chars)
+        # for char in chars:
+        #     im.draw_rect(char)
+        im.show()
+        # print(f"{len(chars)} chars")
+        # for char in chars:
+        #     assert char['width'] < 10
+        #     assert char['height'] < 13
+        #     assert char['width'] > 0.001
+        #     assert char['height'] > 0.1
+        #     assert abs(char['x0'] + char['width'] - char['x1']) < 0.001
+        #     assert abs(char['y0'] + char['height'] - char['y1']) < 0.001
+        #     assert abs(char['width'] - char['adv']) < 0.001
+        #     assert abs(char['height'] - char['size']) < 0.001
+        #     assert char['matrix'][0:4] == (1.0, 0.0, 0.0, 1.0)
+        #     assert char['x0'] <= char['matrix'][4] <= char['x1']
+        #     assert char['y0'] <= char['matrix'][5] <= char['y1']
+        #     assert abs(char['top'] - char['doctop']) < 0.001
+        #     assert abs(char['y0'] + char['bottom'] - page.height) < 0.001
+        #     assert abs(char['y1'] + char['top'] - page.height) < 0.001
+
+
+def extract_data_from_pdf(path: Path) -> tuple[dict[str, list[str]], list[list[str]]]:
+    """Extracts data from a PDF file.
+    It parses the PDF file and extracts strings at specific locations at each page.
+    It uses the 
+    No interpretation of the strings is done.
+    returns (properties, lines), or raises a ParseError or IOError."""
 
     with pdfplumber.open(path) as pdf:
         # Parse header
         headers = pdf.pages[0].within_bbox(INFO_BOX_BBOX)
         words = headers.extract_words(use_text_flow=False, keep_blank_chars=True)
         properties = header_words_to_dict(words)
-        try:
-            date = parse_date(' '.join(properties['datum']))
-            customer_number = (' '.join(properties['ics-klantnummer'])).strip()
-            if len(properties['volgnummer']) > 1:
-                raise ParseError(f"Serial number has multiple words {' '.join(properties['ics-klantnummer'])}")
-            try:
-                serial_number = int(properties['volgnummer'][0])
-            except ValueError:
-                raise ParseError(f"Serial number {properties['ics-klantnummer'][0]} is not an integer") from None
-            if 'vorig tegoed' in properties:
-                previous_balance = parse_amount(*properties['vorig tegoed'])
-            else:
-                previous_balance = parse_amount(*properties['vorig openstaand saldo'])
-            total_received_payment = parse_amount(*properties['totaal ontvangen betalingen'])
-            total_new_expenses = parse_amount(*properties['totaal nieuwe uitgaven'])
-            if 'nieuw tegoed' in properties:
-                new_balance = parse_amount(*properties['nieuw tegoed'])
-            else:
-                new_balance = parse_amount(*properties['nieuw openstaand saldo'])
-        except KeyError as err:
-            # print(properties)
-            raise ParseError(f"{err} not found in header") from None
 
         lines = []
         for page in pdf.pages:
             # Determine column boundaries from the table header
             header = page.within_bbox(TABLE_HEADER_BBOX)
             words = header.extract_words(use_text_flow=True, keep_blank_chars=True)
-            boundaries = get_boundaries_from_first_line(words)
-            assert len(boundaries) > 4
+            boundaries = COLUMN_BOUNDARIES
+            check_transaction_header(words)
 
             # Extract lines of characters from the main table
-            if page.page_number == 1:
-                chars = page.within_bbox(FIRST_PAGE_BODY_BBOX).chars
-            else:
-                chars = page.within_bbox(LATER_PAGE_BODY_BBOX).chars
+            BODY_BOX = FIRST_PAGE_BODY_BBOX if page.page_number == 1 else LATER_PAGE_BODY_BBOX
+            chars = page.within_bbox(BODY_BOX).chars
+            chars = filter_invisible(chars)
+
             char_lines = group_by_lines(chars)
             if not char_lines:
                 raise ParseError(f"No text found on page {page.page_number}")
@@ -446,14 +479,45 @@ def parse_ics_pdf(path: Path) -> BankStatement:
             while char_lines:
                 char_line = char_lines.pop(0)
                 if is_sentence_line(char_line, boundaries):
+                    # a sentence with some comments, rather than a transaction
                     text = ''.join(char['text'] for char in char_line)
                     lines.append([text])
                 else:
                     line = group_by_columns(char_line, boundaries)
                     assert len(line) == len(boundaries)
                     lines.append(line)
+    return (properties, lines)
 
-        # end of with open(): the PDF file is closed here
+
+def parse_ics_pdf(path: Path) -> BankStatement:
+    """This is the main function.
+    It parses the PDF file and outputs it as a data structure.
+    returns a BankStatement, or raises a ParseError or IOError."""
+    properties, lines = extract_data_from_pdf(path)
+
+    # Parse header
+    try:
+        date = parse_date(' '.join(properties['datum']))
+        customer_number = (' '.join(properties['ics-klantnummer'])).strip()
+        if len(properties['volgnummer']) > 1:
+            raise ParseError(f"Serial number has multiple words {' '.join(properties['ics-klantnummer'])}")
+        try:
+            serial_number = int(properties['volgnummer'][0])
+        except ValueError:
+            raise ParseError(f"Serial number {properties['ics-klantnummer'][0]} is not an integer") from None
+        if 'vorig tegoed' in properties:
+            previous_balance = parse_amount(*properties['vorig tegoed'])
+        else:
+            previous_balance = parse_amount(*properties['vorig openstaand saldo'])
+        total_received_payment = parse_amount(*properties['totaal ontvangen betalingen'])
+        total_new_expenses = parse_amount(*properties['totaal nieuwe uitgaven'])
+        if 'nieuw tegoed' in properties:
+            new_balance = parse_amount(*properties['nieuw tegoed'])
+        else:
+            new_balance = parse_amount(*properties['nieuw openstaand saldo'])
+    except KeyError as err:
+        # print(properties)
+        raise ParseError(f"{err} not found in header") from None
 
     # Turn lines into Transaction records,
     # and parse sentences that appear in between transactions.
@@ -635,6 +699,7 @@ def test():
 
     # multiple page (7 pages)
     path3 = file_dir / (filename_prefix + "2023-08" + filename_suffix)
+    path3 = file_dir / (filename_prefix + "2017-04" + filename_suffix)
 
     # description text overlaps with location text
     path4 = file_dir / (filename_prefix + "2018-06" + filename_suffix)
@@ -651,8 +716,11 @@ def test():
     # credit correction (description + location, no country)
     path8 = file_dir / (filename_prefix + "2017-06" + filename_suffix)
 
-    # process_file(path1)
-    for path in (path1, path2, path3, path4, path5, path6, path7, path8):
+    # layout change (foreign currency is left aligned, was right aligned)
+    path9 = file_dir / (filename_prefix + "2026-02" + filename_suffix)
+
+    for path in (path1, path2, path3, path4, path5, path6, path7, path8, path9):
+        # show_box_boundaries(path)
         process_file(path)
 
 

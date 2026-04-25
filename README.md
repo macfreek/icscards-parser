@@ -6,7 +6,7 @@ This Python script translates PDF to CVS.
 
 This script heavily relies on the exact layout of the ICS bank statement.
 If that changes, this script will break.
-It has been tested on bank statements from the last 10 years (2016-2025).
+It has been tested on bank statements from the last 10 years (2016-2026).
 
 ## Requirements
 
