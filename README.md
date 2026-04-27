@@ -1,12 +1,13 @@
-Convert ICS bank statements from PDF to CSV, TSV or JSON.
+Convert bank statements from ICS cards from PDF to CSV, TSV or JSON.
 
-Annoyingly, ICS (icscards.nl) only allows customers to download 
-bank statements in PDF, not in computer readable formats. 
-This Python script translates PDF to CVS.
+ICS is a Dutch credit card issuer (icscards.nl) that allows customers to
+download bank statements in PDF, not in computer readable formats. 
+This Python script translates PDF bank statements to CSV transactions.
 
-This script heavily relies on the exact layout of the ICS bank statement.
-If that changes, this script will break.
-It has been tested on bank statements from the last 10 years (2016-2026).
+This script relies on the exact layout of the ICS bank statement.
+There are checks in place to ensure that it will work on minor variations,
+or report when that fails.
+It has been succesfully tested on bank statements from over 10 years (2016-2026).
 
 ## Requirements
 
